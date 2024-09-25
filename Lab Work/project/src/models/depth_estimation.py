@@ -1,47 +1,83 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchvision.models as models
+
+class Upconv(nn.Module):
+    """Upsampling block with upsample + convolution"""
+    def __init__(self, in_channels, out_channels):
+        super(Upconv, self).__init__()
+        self.upconv = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode='nearest'),  # Upsampling
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1),  # Convolution
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+
+    def forward(self, x):
+        return self.upconv(x)
+
+class MonoDepth2Decoder(nn.Module):
+    def __init__(self, num_ch_enc, scales=[0, 1, 2, 3], num_output_channels=1):
+        super(MonoDepth2Decoder, self).__init__()
+
+        # Initialize the decoder layers for each scale
+        self.num_output_channels = num_output_channels
+        self.scales = scales
+        self.num_ch_enc = num_ch_enc
+
+        # Number of channels for each layer in the decoder
+        self.num_ch_dec = [16, 32, 64, 128, 256]
+
+        # Upsampling layers (MonoDepth2 style)
+        self.upconv_4 = Upconv(self.num_ch_enc[-1], self.num_ch_dec[4])  # Upsample from final encoder layer
+        self.upconv_3 = Upconv(self.num_ch_dec[4], self.num_ch_dec[3])
+        self.upconv_2 = Upconv(self.num_ch_dec[3], self.num_ch_dec[2])
+        self.upconv_1 = Upconv(self.num_ch_dec[2], self.num_ch_dec[1])
+        self.upconv_0 = Upconv(self.num_ch_dec[1], self.num_ch_dec[0])
+
+        # Output layer for predicting the depth map
+        self.dispconv_3 = nn.Conv2d(self.num_ch_dec[3], self.num_output_channels, kernel_size=3, stride=1, padding=1)
+        self.dispconv_2 = nn.Conv2d(self.num_ch_dec[2], self.num_output_channels, kernel_size=3, stride=1, padding=1)
+        self.dispconv_1 = nn.Conv2d(self.num_ch_dec[1], self.num_output_channels, kernel_size=3, stride=1, padding=1)
+        self.dispconv_0 = nn.Conv2d(self.num_ch_dec[0], self.num_output_channels, kernel_size=3, stride=1, padding=1)
+
+    def forward(self, input_features):
+        """
+        input_features: List of feature maps from the encoder, from lowest to highest resolution.
+        """
+        x = input_features[-1]  # Start from the deepest feature map
+        x = self.upconv_4(x)
+
+        x = self.upconv_3(x)
+        disp3 = self.dispconv_3(x)
+
+        x = self.upconv_2(x)
+        disp2 = self.dispconv_2(x)
+
+        x = self.upconv_1(x)
+        disp1 = self.dispconv_1(x)
+
+        x = self.upconv_0(x)
+        disp0 = self.dispconv_0(x)
+
+        return [disp0, disp1, disp2, disp3]  # Return depth predictions at multiple scales
 
 class DepthEstimationModel(nn.Module):
     def __init__(self):
         super(DepthEstimationModel, self).__init__()
 
-        # Encoder
-        self.encoder = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3),  # First layer, input channels = 3 (RGB)
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
+        # Load pretrained ResNet18 model
+        resnet = models.resnet18(pretrained=True)
+        
+        # Use all layers except the fully connected layer
+        self.encoder = nn.Sequential(*list(resnet.children())[:-2])  # Exclude avgpool and FC layer
 
-            nn.Conv2d(64, 128, kernel_size=5, stride=2, padding=2),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
+        # Define the number of channels for each block in the encoder (ResNet18 specific)
+        self.num_ch_enc = [64, 64, 128, 256, 512]
 
-            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-
-            nn.Conv2d(256, 512, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(512),
-            nn.ReLU(inplace=True)
-        )
-
-        # Decoder
-        self.decoder = nn.Sequential(
-            nn.ConvTranspose2d(512, 256, kernel_size=3, stride=2, padding=1, output_padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-
-            nn.ConvTranspose2d(256, 128, kernel_size=3, stride=2, padding=1, output_padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-
-            nn.ConvTranspose2d(128, 64, kernel_size=5, stride=2, padding=2, output_padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-
-            nn.ConvTranspose2d(64, 1, kernel_size=7, stride=2, padding=3, output_padding=1),
-            nn.Sigmoid()  # Sigmoid activation to ensure output is in range (0, 1)
-        )
+        # Initialize MonoDepth2 decoder with ResNet encoder channels
+        self.decoder = MonoDepth2Decoder(self.num_ch_enc)
 
     def forward(self, x):
         """
@@ -49,8 +85,15 @@ class DepthEstimationModel(nn.Module):
         Args:
             x: Input image tensor of shape (B, C, H, W)
         Returns:
-            Depth map tensor of shape (B, 1, H, W)
+            List of depth predictions at multiple scales
         """
-        x = self.encoder(x)
-        x = self.decoder(x)
-        return x
+        # Encoder
+        features = []
+        for i, layer in enumerate(self.encoder):
+            x = layer(x)
+            features.append(x)
+
+        # Decoder (MonoDepth2 style)
+        depth_outputs = self.decoder(features)
+
+        return depth_outputs  # Return depth predictions at multiple scales

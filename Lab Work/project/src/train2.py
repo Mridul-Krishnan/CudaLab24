@@ -64,6 +64,9 @@ def train_model(depth_model, ego_model, flow_model, train_loader, val_loader, nu
             optimizer_flow.zero_grad()
 
             # Forward pass for depth, ego-motion, and flow models
+            if batch_idx==0:
+                print(torch.cat([images, target_images], dim=1).shape)
+                ego_model.update_fc_layer(torch.cat([images, target_images], dim=1).shape[1:], device=device)
             pred_depth = depth_model(images)
             ego_motion = ego_model(torch.cat([images, target_images], dim=1))  # Input 2 stacked frames for ego-motion
             pred_flow = flow_model(images)
@@ -81,7 +84,7 @@ def train_model(depth_model, ego_model, flow_model, train_loader, val_loader, nu
 
             # Update tqdm progress bar with current loss
             train_loader_iter.set_postfix(loss=total_loss.item())
-            break
+            # break
 
         # Validation phase
         depth_model.eval()
@@ -104,7 +107,7 @@ def train_model(depth_model, ego_model, flow_model, train_loader, val_loader, nu
 
                 # Compute validation loss
                 val_loss += compute_total_loss(pred_depth, pred_flow, images, target_images, ego_motion, intrinsic_matrix).item()
-                break
+                # break
 
         val_loss /= len(val_loader)
         print(f'Epoch [{epoch+1}/{num_epochs}], Validation Loss: {val_loss:.4f}')
@@ -115,13 +118,13 @@ def train_model(depth_model, ego_model, flow_model, train_loader, val_loader, nu
         scheduler_flow.step()
 
         with torch.no_grad():
-            depth_sequence = [depth_model(frame.unsqueeze()) for frame in vis_seq]
-            ego_motion_sequence = [ego_model(frame.unsqueeze()) for frame in vis_seq]
-            flow_sequence = [flow_model(frame.unsqueeze()) for frame in vis_seq]
+            depth_sequence = [depth_model(frame) for frame in vis_seq]
+            ego_motion_sequence = [ego_model(torch.cat([frame,frame], dim=1)) for frame in vis_seq]
+            flow_sequence = [flow_model(frame) for frame in vis_seq]
         # Create GIFs for each visualization
         create_depth_gif(depth_sequence, output_file=os.path.join(checkpoint_dir,f"depth_map{epoch}.gif"))
         create_ego_motion_gif(ego_motion_sequence, output_file=os.path.join(checkpoint_dir,f"ego_motion{epoch}.gif"))
-        create_optical_flow_gif(flow_sequence, output_file=os.path.join(checkpoint_dir,f"depth_map{epoch}.gif"))
+        create_optical_flow_gif(flow_sequence, output_file=os.path.join(checkpoint_dir,f"optical_flow{epoch}.gif"))
 
         # Save model checkpoints
         torch.save(depth_model.state_dict(), os.path.join(checkpoint_dir, f'depth_model_epoch_{epoch+1}.pth'))
@@ -164,20 +167,16 @@ if __name__ == "__main__":
     vis_seq = []
     for path in vis_seqpath:
         # Load the images
-        print(path)
         frame1 = cv2.imread(path)
-        
         # Convert from BGR to RGB
         frame1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2RGB)
-        
         # Convert to PIL images for PyTorch transforms
         frame1 = Image.fromarray(frame1)
-
         # Apply any preprocessing or augmentation
         transform = get_augmentations()
         if transform:
             frame1 = transform(frame1)
-        vis_seq.append(frame1)
+        vis_seq.append(frame1.to(device).unsqueeze(0))
             
 
     intrinsic_matrix = torch.eye(3).to(device)
