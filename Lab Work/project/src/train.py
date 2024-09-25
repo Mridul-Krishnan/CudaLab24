@@ -93,7 +93,7 @@ def train_model(resnet, motion_encoder, depth_model, ego_model, flow_model, trai
 
             # Update tqdm progress bar with current loss
             train_loader_iter.set_postfix(loss=total_loss.item())
-            break
+            # break
 
         # Validation phase
         motion_encoder.eval()
@@ -117,7 +117,7 @@ def train_model(resnet, motion_encoder, depth_model, ego_model, flow_model, trai
 
                 # Compute validation loss
                 val_loss += compute_total_loss(pred_depth[0], pred_flow, images, target_images, ego_motion, intrinsic_matrix).item()
-                break
+                # break
 
         val_loss /= len(val_loader)
         print(f'Epoch [{epoch+1}/{num_epochs}], Validation Loss: {val_loss:.4f}')
