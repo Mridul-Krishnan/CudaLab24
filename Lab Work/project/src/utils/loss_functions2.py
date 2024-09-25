@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from utils.ego_warp_utils import *
 
 # Photometric Loss: SSIM + L1
 def photometric_loss(pred, target, alpha=0.85):
@@ -64,50 +65,60 @@ def regularization_loss_flow(pred_flow, image):
 
     return reg_loss_x.mean() + reg_loss_y.mean()
 
+    
+
 def warp_image_with_depth(source_img, depth, ego_motion, intrinsic):
-    """Warp source image to target view using depth and ego-motion."""
     batch_size, _, height, width = source_img.size()
     
     # Generate a meshgrid of pixel coordinates (in homogeneous form)
-    y, x = torch.meshgrid(torch.arange(0, height), torch.arange(0, width))
+    y, x = torch.meshgrid(torch.arange(0, height, device=source_img.device), 
+                          torch.arange(0, width, device=source_img.device),  indexing='ij')
     ones = torch.ones_like(x)
-    pixel_coords = torch.stack([x, y, ones], dim=0).float().to(source_img.device)
-    pixel_coords = pixel_coords.view(3, -1)
-    
+    pixel_coords = torch.stack([x, y, ones], dim=0).float()  # shape: [3, height, width]
+    pixel_coords = pixel_coords.view(3, -1)  # shape: [3, num_pixels]
+
     # Intrinsic inverse
     intrinsic_inv = torch.inverse(intrinsic)
-    
+
     # Compute 3D coordinates in camera frame
-    depth = depth.view(batch_size, 1, -1)
-    cam_coords = intrinsic_inv @ pixel_coords
-    cam_coords = cam_coords * depth
+    depth = depth.view(batch_size, 1, -1)  # shape: [B, 1, num_pixels]
     
+    # Ensure cam_coords has a batch dimension
+    cam_coords = intrinsic_inv @ pixel_coords  # shape: [3, num_pixels]
+    cam_coords = cam_coords.unsqueeze(0).expand(batch_size, -1, -1)  # shape: [B, 3, num_pixels]
+
+    # Multiply cam_coords by depth, should be broadcastable
+    cam_coords = cam_coords * depth  # shape: [B, 3, num_pixels]
+
     # Apply ego-motion (rotation and translation)
-    ego_motion = ego_motion.view(batch_size, 3, 4)  # [R|t] matrix
+    ego_motion = pose_vec2mat(ego_motion, rotation_mode='euler') # [R|t] matrix
     transformed_coords = ego_motion[:, :3, :3] @ cam_coords + ego_motion[:, :3, 3].unsqueeze(2)
-    
+
     # Project back to 2D
-    pixel_coords_warped = intrinsic @ transformed_coords
+    pixel_coords_warped = intrinsic @ transformed_coords  # shape: [B, 3, num_pixels]
     pixel_coords_warped = pixel_coords_warped[:, :2, :] / (pixel_coords_warped[:, 2, :].unsqueeze(1) + 1e-8)
-    
+
     # Normalize pixel coordinates for grid sampling
     pixel_coords_warped = pixel_coords_warped.view(batch_size, 2, height, width)
     pixel_coords_warped = pixel_coords_warped.permute(0, 2, 3, 1)  # [B, H, W, 2]
-    
+
     # Normalize to range [-1, 1] for F.grid_sample
     pixel_coords_warped[:, :, :, 0] = (pixel_coords_warped[:, :, :, 0] / width - 0.5) * 2
     pixel_coords_warped[:, :, :, 1] = (pixel_coords_warped[:, :, :, 1] / height - 0.5) * 2
-    
+
     # Warp the source image using grid sampling
     warped_image = F.grid_sample(source_img, pixel_coords_warped, mode='bilinear', padding_mode='border', align_corners=True)
-    
+
     return warped_image
+
 
 def flow_warp(img, flow):
     """
     Warps the source image using the predicted optical flow.
     """
     B, C, H, W = img.shape
+    _, _, H_flow, W_flow = flow.shape
+
     i_range = torch.arange(0, W).view(1, 1, -1).expand(B, H, W).to(img.device)
     j_range = torch.arange(0, H).view(1, -1, 1).expand(B, H, W).to(img.device)
 
@@ -127,6 +138,7 @@ def flow_warp(img, flow):
 
 
 def compute_total_loss(pred_depth, pred_flow, images, target_images, ego_motion, intrinsic_matrix, alpha=0.85):
+    '''pred_depth[0], pred_flow, images, target_images, ego_motion, intrinsic_matrix'''
     # 1. Photometric loss for depth (use ego-motion and depth to warp image)
     warped_img_depth = warp_image_with_depth(images, pred_depth, ego_motion, intrinsic_matrix)
     loss_photo_depth = photometric_loss(warped_img_depth, target_images, alpha)
@@ -140,7 +152,12 @@ def compute_total_loss(pred_depth, pred_flow, images, target_images, ego_motion,
 
     # 4. Regularization loss for flow (smoothness)
     loss_reg_flow = regularization_loss_flow(pred_flow, images)
-
     # Total loss (sum of all components)
     total_loss = loss_photo_depth + loss_reg_depth + loss_photo_flow + loss_reg_flow
     return total_loss
+
+def generate_warp(images, pred_depth, pred_flow, ego_motion, intrinsic_matrix):
+    '''images, pred_depth, pred_flow, ego_motion, intrinsic_matrix'''
+    warped_img_depth = warp_image_with_depth(images, pred_depth, ego_motion, intrinsic_matrix)
+    warped_img_flow = flow_warp(images, pred_flow)
+    return (warped_img_depth, warped_img_flow)

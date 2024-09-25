@@ -1,7 +1,8 @@
 import imageio
 import os
 import matplotlib.pyplot as plt
-
+import torch
+from torchvision.utils import flow_to_image
 
 def visualize_depth(depth_map):
     depth_map = depth_map.squeeze().cpu().detach().numpy()
@@ -38,9 +39,9 @@ def create_depth_gif(depth_sequence, output_file="depth_animation.gif"):
         # Plot and save each frame as an image
         fig, ax = plt.subplots()
         depth_map = depth_map.squeeze().cpu().detach().numpy()
-        ax.imshow(depth_map, cmap='plasma')
+        ax.imshow(depth_map, cmap='gray')
         ax.set_title(f"Depth Map Frame {i}")
-        plt.colorbar(ax.imshow(depth_map, cmap='plasma'))
+        plt.colorbar(ax.imshow(depth_map, cmap='gray'))
         
         # Save the frame
         frame_path = f"depth_frame_{i}.png"
@@ -89,19 +90,21 @@ def create_optical_flow_gif(flow_sequence, output_file="flow_animation.gif"):
     for i, flow in enumerate(flow_sequence):
         fig, ax = plt.subplots()
         
-        # Extract the flow (flow should be of shape (batch, 2, H, W), for simplicity we take [0] as the batch)
-        flow = flow[0].cpu().detach().numpy()  # (2, H, W)
-        u = flow[0]  # Horizontal flow
-        v = flow[1]  # Vertical flow
+        flow = flow_to_image(flow)
+        flow = flow[0].permute(1, 2, 0).cpu().detach().numpy()  # Convert from CHW to HWC
         
-        ax.quiver(u, v, angles="xy", scale_units="xy", scale=1, color="r")
-        ax.set_title(f"Optical Flow Frame {i}")
+        
+        # Plot and save each frame as an image
+        fig, ax = plt.subplots()
+        ax.imshow(flow)
+        ax.set_title(f"flow Frame {i}")
+        plt.axis('off')  # Hide the axes for a cleaner look
         
         # Save the frame
         frame_path = f"flow_frame_{i}.png"
         plt.savefig(frame_path)
-        images.append(imageio.imread(frame_path))
-        plt.close(fig)
+        images.append(imageio.imread(frame_path))  # Append to image list for gif creation
+        plt.close(fig)  # Close the plot
         
         # Remove the temporary image
         os.remove(frame_path)
@@ -109,3 +112,38 @@ def create_optical_flow_gif(flow_sequence, output_file="flow_animation.gif"):
     # Save the frames as a GIF
     imageio.mimsave(output_file, images, fps=5)
     print(f"Optical Flow GIF saved at {output_file}")
+
+def create_rgb_gif(rgb_sequence, output_file="rgb_animation.gif"):
+    # rgb_sequence: A list of RGB images (each as a torch.Tensor or numpy array)
+    # Standard deviation and mean used for normalization
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1).to(device)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1).to(device)
+
+    
+    images = []
+    for i, rgb_image in enumerate(rgb_sequence):
+         # Reverse the normalization
+        rgb_image = rgb_image * std + mean
+        # Convert to numpy and ensure the correct format
+        rgb_image = rgb_image[0].permute(1, 2, 0).cpu().detach().numpy()  # Convert from CHW to HWC
+        
+        
+        # Plot and save each frame as an image
+        fig, ax = plt.subplots()
+        ax.imshow(rgb_image)
+        ax.set_title(f"RGB Frame {i}")
+        plt.axis('off')  # Hide the axes for a cleaner look
+        
+        # Save the frame
+        frame_path = f"rgb_frame_{i}.png"
+        plt.savefig(frame_path)
+        images.append(imageio.imread(frame_path))  # Append to image list for gif creation
+        plt.close(fig)  # Close the plot
+        
+        # Remove the temporary image
+        os.remove(frame_path)
+    
+    # Save the frames as a GIF
+    imageio.mimsave(output_file, images, fps=5)  # fps: frames per second
+    print(f"RGB GIF saved at {output_file}")

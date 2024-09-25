@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
+import torch.nn.init as init
 
 class Upconv(nn.Module):
     """Upsampling block with upsample + convolution"""
@@ -41,6 +42,7 @@ class MonoDepth2Decoder(nn.Module):
         self.dispconv_2 = nn.Conv2d(self.num_ch_dec[2], self.num_output_channels, kernel_size=3, stride=1, padding=1)
         self.dispconv_1 = nn.Conv2d(self.num_ch_dec[1], self.num_output_channels, kernel_size=3, stride=1, padding=1)
         self.dispconv_0 = nn.Conv2d(self.num_ch_dec[0], self.num_output_channels, kernel_size=3, stride=1, padding=1)
+    
 
     def forward(self, input_features):
         """
@@ -64,20 +66,28 @@ class MonoDepth2Decoder(nn.Module):
         return [disp0, disp1, disp2, disp3]  # Return depth predictions at multiple scales
 
 class DepthEstimationModel(nn.Module):
-    def __init__(self):
+    def __init__(self, resnet):
         super(DepthEstimationModel, self).__init__()
 
         # Load pretrained ResNet18 model
-        resnet = models.resnet18(pretrained=True)
+        #resnet = models.resnet18(pretrained=True)
         
         # Use all layers except the fully connected layer
-        self.encoder = nn.Sequential(*list(resnet.children())[:-2])  # Exclude avgpool and FC layer
+        self.encoder = resnet  # Exclude avgpool and FC layer
 
         # Define the number of channels for each block in the encoder (ResNet18 specific)
         self.num_ch_enc = [64, 64, 128, 256, 512]
 
         # Initialize MonoDepth2 decoder with ResNet encoder channels
         self.decoder = MonoDepth2Decoder(self.num_ch_enc)
+        self.initialize_weights_he(self.decoder)
+
+    def initialize_weights_he(self, model):
+        for layer in model.children():
+            if isinstance(layer, nn.Conv2d):
+                init.kaiming_uniform_(layer.weight, nonlinearity='relu')
+                if layer.bias is not None:
+                    init.zeros_(layer.bias)
 
     def forward(self, x):
         """
